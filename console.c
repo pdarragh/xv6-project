@@ -37,7 +37,7 @@ struct input {
 };
 
 struct input inputs[NUM_CONSOLES];
-int current_console = 0;
+unsigned int current_console = 0;
 
 
 struct termbuf termbufs[NUM_CONSOLES];
