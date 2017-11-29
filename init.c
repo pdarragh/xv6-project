@@ -12,9 +12,12 @@ main(void)
 {
   int pid, wpid;
 
-  if(open("console", O_RDWR) < 0){
-    mknod("console", 1, 1);
-    open("console", O_RDWR);
+  if(open("console0", O_RDWR) < 0){
+    mknod("console0", 1, 0);
+    mknod("console1", 1, 1);
+    mknod("console2", 1, 2);
+    mknod("console3", 1, 3);
+    open("console0", O_RDWR);
   }
   dup(0);  // stdout
   dup(0);  // stderr

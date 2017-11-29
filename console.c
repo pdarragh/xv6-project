@@ -15,6 +15,18 @@
 #include "proc.h"
 #include "x86.h"
 
+#define NUM_CONSOLES 4
+#define TERM_NUM_ROWS 80
+#define TERM_NUM_COLS 25
+
+struct termbuf {
+  char b[TERM_NUM_ROWS][TERM_NUM_COLS];
+  int x;
+  int y;
+};
+
+struct termbuf termbufs[NUM_CONSOLES];
+
 static void consputc(int);
 
 static int panicked = 0;
@@ -179,12 +191,15 @@ consputc(int c)
 }
 
 #define INPUT_BUF 128
-struct {
+struct input {
   char buf[INPUT_BUF];
   uint r;  // Read index
   uint w;  // Write index
   uint e;  // Edit index
-} input;
+};
+
+struct input inputs[NUM_CONSOLES];
+int current_console = 0;
 
 #define C(x)  ((x)-'@')  // Control-x
 
@@ -192,6 +207,7 @@ void
 consoleintr(int (*getc)(void))
 {
   int c, doprocdump = 0;
+  struct input *input = &inputs[current_console];
 
   acquire(&cons.lock);
   while((c = getc()) >= 0){
@@ -201,26 +217,26 @@ consoleintr(int (*getc)(void))
       doprocdump = 1;
       break;
     case C('U'):  // Kill line.
-      while(input.e != input.w &&
-            input.buf[(input.e-1) % INPUT_BUF] != '\n'){
-        input.e--;
+      while(input->e != input->w &&
+            input->buf[(input->e-1) % INPUT_BUF] != '\n'){
+        input->e--;
         consputc(BACKSPACE);
       }
       break;
     case C('H'): case '\x7f':  // Backspace
-      if(input.e != input.w){
-        input.e--;
+      if(input->e != input->w){
+        input->e--;
         consputc(BACKSPACE);
       }
       break;
     default:
-      if(c != 0 && input.e-input.r < INPUT_BUF){
+      if(c != 0 && input->e-input->r < INPUT_BUF){
         c = (c == '\r') ? '\n' : c;
-        input.buf[input.e++ % INPUT_BUF] = c;
+        input->buf[input->e++ % INPUT_BUF] = c;
         consputc(c);
-        if(c == '\n' || c == C('D') || input.e == input.r+INPUT_BUF){
-          input.w = input.e;
-          wakeup(&input.r);
+        if(c == '\n' || c == C('D') || input->e == input->r+INPUT_BUF){
+          input->w = input->e;
+          wakeup(&input->r);
         }
       }
       break;
@@ -237,25 +253,26 @@ consoleread(struct inode *ip, char *dst, int n)
 {
   uint target;
   int c;
+  struct input *input = &inputs[current_console];
 
   iunlock(ip);
   target = n;
   acquire(&cons.lock);
   while(n > 0){
-    while(input.r == input.w){
+    while(input->r == input->w){
       if(myproc()->killed){
         release(&cons.lock);
         ilock(ip);
         return -1;
       }
-      sleep(&input.r, &cons.lock);
+      sleep(&input->r, &cons.lock);
     }
-    c = input.buf[input.r++ % INPUT_BUF];
+    c = input->buf[input->r++ % INPUT_BUF];
     if(c == C('D')){  // EOF
       if(n < target){
         // Save ^D for next time, to make sure
         // caller gets a 0-byte result.
-        input.r--;
+        input->r--;
       }
       break;
     }
@@ -289,6 +306,17 @@ void
 consoleinit(void)
 {
   initlock(&cons.lock, "console");
+
+  for(int i=0; i<NUM_CONSOLES; ++i){
+    memset(&(termbufs[i].b), ' ', TERM_NUM_ROWS*TERM_NUM_COLS);
+    termbufs[i].x = 0;
+    termbufs[i].y = 0;
+
+    memset(&(inputs[i].buf), 0, INPUT_BUF);
+    inputs[i].r = 0;
+    inputs[i].w = 0;
+    inputs[i].e = 0;
+  }
 
   devsw[CONSOLE].write = consolewrite;
   devsw[CONSOLE].read = consoleread;
