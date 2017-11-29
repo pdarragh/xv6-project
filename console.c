@@ -156,39 +156,76 @@ panic(char *s)
 #define CRTPORT 0x3d4
 static ushort *crt = (ushort*)P2V(0xb8000);  // CGA memory
 
-static void
-cgaputc(int c)
-{
+int cga_pos_read(){
   int pos;
-
   // Cursor position: col + 80*row.
   outb(CRTPORT, 14);
   pos = inb(CRTPORT+1) << 8;
   outb(CRTPORT, 15);
   pos |= inb(CRTPORT+1);
-
-  if(c == '\n')
-    pos += 80 - pos%80;
-  else if(c == BACKSPACE){
-    if(pos > 0) --pos;
-  } else
-    crt[pos++] = (c&0xff) | 0x0700;  // black on white
-
-  if(pos < 0 || pos > 25*80)
-    panic("pos under/overflow");
-
-  if((pos/80) >= 24){  // Scroll up.
-    memmove(crt, crt+80, sizeof(crt[0])*23*80);
-    pos -= 80;
-    memset(crt+pos, 0, sizeof(crt[0])*(24*80 - pos));
-  }
-
+  return pos;
+}
+void cga_pos_write(int pos){
   outb(CRTPORT, 14);
   outb(CRTPORT+1, pos>>8);
   outb(CRTPORT, 15);
   outb(CRTPORT+1, pos);
   crt[pos] = ' ' | 0x0700;
 }
+int cga_xy_to_pos(int x, int y){
+  return x + 80*y;
+}
+
+void cga_putc_no_fuss(int c){
+  crt[cga_pos_read()] = (c&0xff) | 0x0700;
+}
+
+void cga_putc_xy(int x, int y, int c){
+  cga_pos_write(cga_xy_to_pos(x,y));
+  cga_putc_no_fuss(c);
+}
+
+void cga_clear(){
+  for(int y=0; y<TERM_NUM_ROWS; ++y){
+    for(int x=0; x<TERM_NUM_COLS; ++x){
+      cga_putc_xy(x,y,' ');
+    }
+  }
+}
+
+//static void
+//cgaputc(int c)
+//{
+//  int pos;
+//
+//  // Cursor position: col + 80*row.
+//  outb(CRTPORT, 14);
+//  pos = inb(CRTPORT+1) << 8;
+//  outb(CRTPORT, 15);
+//  pos |= inb(CRTPORT+1);
+//
+//  if(c == '\n')
+//    pos += 80 - pos%80;
+//  else if(c == BACKSPACE){
+//    if(pos > 0) --pos;
+//  } else
+//    crt[pos++] = (c&0xff) | 0x0700;  // black on white
+//
+//  if(pos < 0 || pos > 25*80)
+//    panic("pos under/overflow");
+//
+//  if((pos/80) >= 24){  // Scroll up.
+//    memmove(crt, crt+80, sizeof(crt[0])*23*80);
+//    pos -= 80;
+//    memset(crt+pos, 0, sizeof(crt[0])*(24*80 - pos));
+//  }
+//
+//  outb(CRTPORT, 14);
+//  outb(CRTPORT+1, pos>>8);
+//  outb(CRTPORT, 15);
+//  outb(CRTPORT+1, pos);
+//  crt[pos] = ' ' | 0x0700;
+//}
 
 void
 termbufputc(int c, int console_id){
@@ -252,8 +289,7 @@ void uart_putc_xy(int x, int y, char c){
   uartputc(c);
 }
 
-void
-term_uart_print(int console_id){
+void term_print(int console_id){
   struct termbuf *tb = &termbufs[console_id];
   for(int y=0; y<TERM_NUM_ROWS; ++y){
     int ey = (y+tb->top_y) % TERM_NUM_ROWS;
@@ -263,6 +299,7 @@ term_uart_print(int console_id){
       if(newc != oldc){
         last_out.b[x][y] = newc;
         uart_putc_xy(x, y, newc);
+        cga_putc_xy(x, y, newc);
       }
     }
   }
@@ -281,6 +318,7 @@ consputc(int c, int console_id)
   static int firstput = 1;
   if(firstput){
     uart_clear();
+    cga_clear();
     uart_goto_xy(0,0);
     firstput = 0;
   }
@@ -290,8 +328,8 @@ consputc(int c, int console_id)
 //    uartputc('\b'); uartputc(' '); uartputc('\b');
 //  } else
 //    uartputc(c);
-  term_uart_print(console_id);
-  cgaputc(c);
+  term_print(console_id);
+  //cgaputc(c);
 }
 
 #define C(x)  ((x)-'@')  // Control-x
@@ -418,7 +456,6 @@ consoleinit(void)
   devsw[CONSOLE].read = consoleread;
   cons.locking = 1;
 
-  uart_clear();
   ioapicenable(IRQ_KBD, 0);
 }
 
