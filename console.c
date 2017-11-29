@@ -16,18 +16,34 @@
 #include "x86.h"
 
 #define NUM_CONSOLES 4
-#define TERM_NUM_ROWS 80
-#define TERM_NUM_COLS 25
+#define TERM_NUM_ROWS 25
+#define TERM_NUM_COLS 80
+#define INPUT_BUF 128
 
 struct termbuf {
-  char b[TERM_NUM_ROWS][TERM_NUM_COLS];
+  char b[TERM_NUM_COLS][TERM_NUM_ROWS];
   int x;
   int y;
+  // as new lines come in on the bottom, we treat this like a ring buffer
+  int top_y;
+  int rows_used;
 };
 
-struct termbuf termbufs[NUM_CONSOLES];
+struct input {
+  char buf[INPUT_BUF];
+  uint r;  // Read index
+  uint w;  // Write index
+  uint e;  // Edit index
+};
 
-static void consputc(int);
+struct input inputs[NUM_CONSOLES];
+int current_console = 0;
+
+
+struct termbuf termbufs[NUM_CONSOLES];
+struct termbuf last_out;
+
+static void consputc(int, int);
 
 static int panicked = 0;
 
@@ -58,7 +74,7 @@ printint(int xx, int base, int sign)
     buf[i++] = '-';
 
   while(--i >= 0)
-    consputc(buf[i]);
+    consputc(buf[i], current_console);
 }
 //PAGEBREAK: 50
 
@@ -80,7 +96,7 @@ cprintf(char *fmt, ...)
   argp = (uint*)(void*)(&fmt + 1);
   for(i = 0; (c = fmt[i] & 0xff) != 0; i++){
     if(c != '%'){
-      consputc(c);
+      consputc(c, current_console);
       continue;
     }
     c = fmt[++i] & 0xff;
@@ -98,15 +114,15 @@ cprintf(char *fmt, ...)
       if((s = (char*)*argp++) == 0)
         s = "(null)";
       for(; *s; s++)
-        consputc(*s);
+        consputc(*s, current_console);
       break;
     case '%':
-      consputc('%');
+      consputc('%', current_console);
       break;
     default:
       // Print unknown % sequence to draw attention.
-      consputc('%');
-      consputc(c);
+      consputc('%', current_console);
+      consputc(c, current_console);
       break;
     }
   }
@@ -175,7 +191,85 @@ cgaputc(int c)
 }
 
 void
-consputc(int c)
+termbufputc(int c, int console_id){
+  struct termbuf *tb = &termbufs[console_id];
+  int incr_col = 0;
+
+  if(c == BACKSPACE){
+    // only backspace on the current line
+    if(tb->x != 0){
+      tb->x -= 1;
+      tb->b[tb->x][tb->y] = ' ';
+    }
+  } else if(c == '\n'){
+    incr_col = 1;
+    tb->x = 0;
+  } else if(c == '\r'){
+    //incr_col = 1;
+    //tb->x = 0;
+  } else {
+    tb->b[tb->x][tb->y] = c;
+    tb->x += 1;
+    if(tb->x >= TERM_NUM_COLS){
+      tb->x = 0;
+      incr_col = 1;
+    }
+  }
+  if(incr_col){
+    tb->y = (tb->y + 1) % TERM_NUM_ROWS;
+    for(int i=0; i<TERM_NUM_COLS; ++i){
+      tb->b[i][tb->y] = ' ';
+    }
+    if(tb->rows_used >= TERM_NUM_ROWS){
+      tb->top_y = (tb->top_y + 1) % TERM_NUM_ROWS;
+    } else {
+      tb->rows_used += 1;
+    }
+  }
+}
+
+void uart_clear(){
+  uartputc(0x1b);
+  uartputc('[');
+  uartputc('2');
+  uartputc('J');
+}
+void uart_goto_xy(int x, int y){
+  // terminal locations are 1-based...
+  ++y; ++x;
+  uartputc(0x1b);
+  uartputc('[');
+  // TODO -- deal with >100
+  uartputc(y/10 + '0');
+  uartputc(y%10 + '0');
+  uartputc(';');
+  uartputc(x/10 + '0');
+  uartputc(x%10 + '0');
+  uartputc('H');
+}
+void uart_putc_xy(int x, int y, char c){
+  uart_goto_xy(x,y);
+  uartputc(c);
+}
+
+void
+term_uart_print(int console_id){
+  struct termbuf *tb = &termbufs[console_id];
+  for(int y=0; y<TERM_NUM_ROWS; ++y){
+    int ey = (y+tb->top_y) % TERM_NUM_ROWS;
+    for(int x=0; x<TERM_NUM_COLS; ++x){
+      char newc = tb->b[x][ey];
+      char oldc = last_out.b[x][y];
+      if(newc != oldc){
+        last_out.b[x][y] = newc;
+        uart_putc_xy(x, y, newc);
+      }
+    }
+  }
+}
+
+void
+consputc(int c, int console_id)
 {
   if(panicked){
     cli();
@@ -183,23 +277,22 @@ consputc(int c)
       ;
   }
 
-  if(c == BACKSPACE){
-    uartputc('\b'); uartputc(' '); uartputc('\b');
-  } else
-    uartputc(c);
+  // be sure to clean things up before we start writing stuff
+  static int firstput = 1;
+  if(firstput){
+    uart_clear();
+    uart_goto_xy(0,0);
+    firstput = 0;
+  }
+
+  termbufputc(c, console_id);
+//  if(c == BACKSPACE){
+//    uartputc('\b'); uartputc(' '); uartputc('\b');
+//  } else
+//    uartputc(c);
+  term_uart_print(console_id);
   cgaputc(c);
 }
-
-#define INPUT_BUF 128
-struct input {
-  char buf[INPUT_BUF];
-  uint r;  // Read index
-  uint w;  // Write index
-  uint e;  // Edit index
-};
-
-struct input inputs[NUM_CONSOLES];
-int current_console = 0;
 
 #define C(x)  ((x)-'@')  // Control-x
 
@@ -220,20 +313,20 @@ consoleintr(int (*getc)(void))
       while(input->e != input->w &&
             input->buf[(input->e-1) % INPUT_BUF] != '\n'){
         input->e--;
-        consputc(BACKSPACE);
+        consputc(BACKSPACE, current_console);
       }
       break;
     case C('H'): case '\x7f':  // Backspace
       if(input->e != input->w){
         input->e--;
-        consputc(BACKSPACE);
+        consputc(BACKSPACE, current_console);
       }
       break;
     default:
       if(c != 0 && input->e-input->r < INPUT_BUF){
         c = (c == '\r') ? '\n' : c;
         input->buf[input->e++ % INPUT_BUF] = c;
-        consputc(c);
+        consputc(c, current_console);
         if(c == '\n' || c == C('D') || input->e == input->r+INPUT_BUF){
           input->w = input->e;
           wakeup(&input->r);
@@ -295,7 +388,7 @@ consolewrite(struct inode *ip, char *buf, int n)
   iunlock(ip);
   acquire(&cons.lock);
   for(i = 0; i < n; i++)
-    consputc(buf[i] & 0xff);
+    consputc(buf[i] & 0xff, current_console);
   release(&cons.lock);
   ilock(ip);
 
@@ -311,17 +404,21 @@ consoleinit(void)
     memset(&(termbufs[i].b), ' ', TERM_NUM_ROWS*TERM_NUM_COLS);
     termbufs[i].x = 0;
     termbufs[i].y = 0;
+    termbufs[i].top_y = 0;
+    termbufs[i].rows_used = 1;
 
     memset(&(inputs[i].buf), 0, INPUT_BUF);
     inputs[i].r = 0;
     inputs[i].w = 0;
     inputs[i].e = 0;
   }
+  memset(&(last_out.b), ' ', TERM_NUM_ROWS*TERM_NUM_COLS);
 
   devsw[CONSOLE].write = consolewrite;
   devsw[CONSOLE].read = consoleread;
   cons.locking = 1;
 
+  uart_clear();
   ioapicenable(IRQ_KBD, 0);
 }
 
