@@ -347,6 +347,14 @@ consoleintr(int (*getc)(void))
       // procdump() locks cons.lock indirectly; invoke later
       doprocdump = 1;
       break;
+    case C('L'):  // previous console
+      current_console = (current_console-1) % NUM_CONSOLES;
+      term_print(current_console);
+      break;
+    case C('R'):  // next console
+      current_console = (current_console+1) % NUM_CONSOLES;
+      term_print(current_console);
+      break;
     case C('U'):  // Kill line.
       while(input->e != input->w &&
             input->buf[(input->e-1) % INPUT_BUF] != '\n'){
@@ -384,7 +392,8 @@ consoleread(struct inode *ip, char *dst, int n)
 {
   uint target;
   int c;
-  struct input *input = &inputs[current_console];
+  short console_num = ip->minor;
+  struct input *input = &inputs[console_num];
 
   iunlock(ip);
   target = n;
@@ -423,10 +432,11 @@ consolewrite(struct inode *ip, char *buf, int n)
 {
   int i;
 
+  short console_num = ip->minor;
   iunlock(ip);
   acquire(&cons.lock);
   for(i = 0; i < n; i++)
-    consputc(buf[i] & 0xff, current_console);
+    consputc(buf[i] & 0xff, console_num);
   release(&cons.lock);
   ilock(ip);
 

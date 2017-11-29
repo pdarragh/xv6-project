@@ -7,17 +7,29 @@
 
 char *argv[] = { "sh", 0 };
 
+// this is a duplicate, but I don't want to bother putting one in a common place right now.
+#define NUM_CONSOLES 4
+
 int
 main(void)
 {
   int pid, wpid;
 
-  if(open("console0", O_RDWR) < 0){
-    mknod("console0", 1, 0);
-    mknod("console1", 1, 1);
-    mknod("console2", 1, 2);
-    mknod("console3", 1, 3);
-    open("console0", O_RDWR);
+  int i = 0;
+  // just make 4 init processes that each spawn shells
+  for(; i < NUM_CONSOLES - 1; ++i){
+    pid = fork();
+    if(pid == 0){
+      break;
+    }
+  }
+
+  char consname[10];
+  memmove(consname, "console0", 9);
+  consname[8] = i + '0';
+  if(open(consname, O_RDWR) < 0){
+    mknod(consname, 1, i);
+    open(consname, O_RDWR);
   }
   dup(0);  // stdout
   dup(0);  // stderr
