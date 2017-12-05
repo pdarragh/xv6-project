@@ -328,7 +328,9 @@ consputc(int c, int console_id)
 //    uartputc('\b'); uartputc(' '); uartputc('\b');
 //  } else
 //    uartputc(c);
-  term_print(console_id);
+  if(current_console == console_id){
+    term_print(console_id);
+  }
   //cgaputc(c);
 }
 
