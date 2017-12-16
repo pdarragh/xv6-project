@@ -3,13 +3,15 @@
 #include "types.h"
 #include "user.h"
 #include "fcntl.h"
+#include "param.h"
 
 // Parsed command representation
-#define EXEC  1
-#define REDIR 2
-#define PIPE  3
-#define LIST  4
-#define BACK  5
+#define EXEC    1
+#define REDIR   2
+#define PIPE    3
+#define LIST    4
+#define BACK    5
+#define REDIRFD 6
 
 #define MAXARGS 10
 
@@ -30,6 +32,13 @@ struct redircmd {
   char *efile;
   int mode;
   int fd;
+};
+
+struct redirfdcmd {
+  int type;
+  struct cmd *cmd;
+  int outfd;
+  int infd;
 };
 
 struct pipecmd {
@@ -58,82 +67,91 @@ void
 runcmd(struct cmd *cmd)
 {
   int p[2];
+//  int fds[3];
   struct backcmd *bcmd;
   struct execcmd *ecmd;
   struct listcmd *lcmd;
   struct pipecmd *pcmd;
   struct redircmd *rcmd;
+  struct redirfdcmd *fcmd;
 
   if(cmd == 0)
     exit();
 
   switch(cmd->type){
-  default:
-    panic("runcmd");
+    default:
+      panic("runcmd");
 
-  case EXEC:
-    ecmd = (struct execcmd*)cmd;
-    if(ecmd->argv[0] == 0)
-      exit();
-    exec(ecmd->argv[0], ecmd->argv);
-    printf(2, "exec %s failed\n", ecmd->argv[0]);
-    break;
+    case EXEC:
+      ecmd = (struct execcmd*)cmd;
+      if(ecmd->argv[0] == 0)
+        exit();
+      exec(ecmd->argv[0], ecmd->argv);
+      printf(2, "exec %s failed\n", ecmd->argv[0]);
+      break;
 
-  case REDIR:
-    rcmd = (struct redircmd*)cmd;
-    close(rcmd->fd);
-    if(open(rcmd->file, rcmd->mode) < 0){
-      printf(2, "open %s failed\n", rcmd->file);
-      exit();
-    }
-    runcmd(rcmd->cmd);
-    break;
+    case REDIR:
+      rcmd = (struct redircmd*)cmd;
+      close(rcmd->fd);
+      if(open(rcmd->file, rcmd->mode) < 0){
+        printf(2, "open %s failed\n", rcmd->file);
+        exit();
+      }
+      runcmd(rcmd->cmd);
+      break;
 
-  case LIST:
-    lcmd = (struct listcmd*)cmd;
-    if(fork1() == 0)
-      runcmd(lcmd->left);
-    wait();
-    runcmd(lcmd->right);
-    break;
+    case REDIRFD:
+      fcmd = (struct redirfdcmd*)cmd;
+      close(fcmd->infd);
+      dup(fcmd->outfd);
+      runcmd(fcmd->cmd);
+      break;
 
-  case PIPE:
-    pcmd = (struct pipecmd*)cmd;
-    if(pipe(p) < 0)
-      panic("pipe");
-    if(fork1() == 0){
-      close(1);
-      dup(p[1]);
+    case LIST:
+      lcmd = (struct listcmd*)cmd;
+      if(fork1() == 0)
+        runcmd(lcmd->left);
+      wait();
+      runcmd(lcmd->right);
+      break;
+
+    case PIPE:
+      pcmd = (struct pipecmd*)cmd;
+      if(pipe(p) < 0)
+        panic("pipe");
+      if(fork1() == 0){
+        close(1);
+        dup(p[1]);
+        close(p[0]);
+        close(p[1]);
+        runcmd(pcmd->left);
+      }
+      if(fork1() == 0){
+        close(0);
+        dup(p[0]);
+        close(p[0]);
+        close(p[1]);
+        runcmd(pcmd->right);
+      }
       close(p[0]);
       close(p[1]);
-      runcmd(pcmd->left);
-    }
-    if(fork1() == 0){
-      close(0);
-      dup(p[0]);
-      close(p[0]);
-      close(p[1]);
-      runcmd(pcmd->right);
-    }
-    close(p[0]);
-    close(p[1]);
-    wait();
-    wait();
-    break;
+      wait();
+      wait();
+      break;
 
-  case BACK:
-    bcmd = (struct backcmd*)cmd;
-    if(fork1() == 0)
-      runcmd(bcmd->cmd);
-    break;
+    case BACK:
+      bcmd = (struct backcmd*)cmd;
+      if(fork1() == 0)
+        runcmd(bcmd->cmd);
+      break;
   }
   exit();
 }
 
 int
-getcmd(char *buf, int nbuf)
+getcmd(char *buf, int nbuf, int cons)
 {
-  printf(2, "$ ");
+  printf(2, "%d> ", cons);
   memset(buf, 0, nbuf);
   gets(buf, nbuf);
   if(buf[0] == 0) // EOF
@@ -142,21 +160,26 @@ getcmd(char *buf, int nbuf)
 }
 
 int
-main(void)
+main(int argc, char* argv[])
 {
   static char buf[100];
-  int fd;
 
-  // Ensure that three file descriptors are open.
-  while((fd = open("console", O_RDWR)) >= 0){
-    if(fd >= 3){
-      close(fd);
-      break;
-    }
+  if (argc != 2) {
+    panic("incorrect number of arguments to sh\n");
   }
+  int cons_no = argv[1][0] - 48;
+
+  // Close any existing low-level file descriptors. (These are leftovers from init.)
+  close(0);
+  close(1);
+  close(2);
+  // Open the appropriate console device. These should have been opened by init.
+  dup(cons_no + 3);
+  dup(cons_no + 3);
+  dup(cons_no + 3);
 
   // Read and run input commands.
-  while(getcmd(buf, sizeof(buf)) >= 0){
+  while(getcmd(buf, sizeof(buf), cons_no) >= 0){
     if(buf[0] == 'c' && buf[1] == 'd' && buf[2] == ' '){
       // Chdir must be called by the parent, not the child.
       buf[strlen(buf)-1] = 0;  // chop \n
@@ -164,8 +187,18 @@ main(void)
         printf(2, "cannot cd %s\n", buf+3);
       continue;
     }
-    if(fork1() == 0)
+    else if(buf[0] == 's' && buf[1] == 'h' && (buf[2] == '\n' || buf[2] == ' ')){
+      // Insert correct console device number.
+      // TODO: This will break some things.
+      buf[2] = ' ';
+      buf[3] = cons_no + '0';
+      buf[4] = '\n';
+      buf[5] = 0;
+      continue;
+    }
+    if(fork1() == 0) {
       runcmd(parsecmd(buf));
+    }
     wait();
   }
   exit();
@@ -220,6 +253,20 @@ redircmd(struct cmd *subcmd, char *file, char *efile, int mode, int fd)
 }
 
 struct cmd*
+redirfdcmd(struct cmd *subcmd, int outfd, int infd)
+{
+  struct redirfdcmd *cmd;
+
+  cmd = malloc(sizeof(*cmd));
+  memset(cmd, 0, sizeof(*cmd));
+  cmd->type = REDIRFD;
+  cmd->cmd = subcmd;
+  cmd->outfd = outfd;  // The fd which will be written to.
+  cmd->infd = infd;  // The fd which will be closed for outfd to dup into.
+  return (struct cmd*)cmd;
+}
+
+struct cmd*
 pipecmd(struct cmd *left, struct cmd *right)
 {
   struct pipecmd *cmd;
@@ -265,42 +312,59 @@ char symbols[] = "<|>&;()";
 int
 gettoken(char **ps, char *es, char **q, char **eq)
 {
-  char *s;
-  int ret;
+  // **ps   pointer to string
+  // *es    end of string
+  // **q    ...
+  // **eq   ...
+  char *s;  // start of string
+  int ret;  // return value
 
+  // Start at the head of the string. Iterate through all whitespace.
   s = *ps;
   while(s < es && strchr(whitespace, *s))
     s++;
+  // Set q to be the start of the token.
   if(q)
     *q = s;
+  // Start with the beginning.
   ret = *s;
   switch(*s){
-  case 0:
-    break;
-  case '|':
-  case '(':
-  case ')':
-  case ';':
-  case '&':
-  case '<':
-    s++;
-    break;
-  case '>':
-    s++;
-    if(*s == '>'){
-      ret = '+';
+    case 0:
+      break;
+    case '|':
+    case '(':
+    case ')':
+    case ';':
+    case '&':
+    case '<':
       s++;
-    }
-    break;
-  default:
-    ret = 'a';
-    while(s < es && !strchr(whitespace, *s) && !strchr(symbols, *s))
+      break;
+    case '>':
       s++;
-    break;
+      if(*s == '>'){
+        ret = '+';
+        s++;
+      } else if(*s == '&'){  // fd redirect
+        ret = '*';
+        s++;
+      } else if(*s == 'c'){  // console redirect (just a pretty fd redirect)
+        ret = 'c';
+        s++;
+      }
+      break;
+    default:
+      // 'a' indicates that we have some non-special token.
+      // Iterate forward to the end of the token.
+      ret = 'a';
+      while(s < es && !strchr(whitespace, *s) && !strchr(symbols, *s))
+        s++;
+      break;
   }
+  // Set eq to the end of the parsed token.
   if(eq)
     *eq = s;
 
+  // Iterate forward through any remaining whitespace.
   while(s < es && strchr(whitespace, *s))
     s++;
   *ps = s;
@@ -376,21 +440,35 @@ parseredirs(struct cmd *cmd, char **ps, char *es)
 {
   int tok;
   char *q, *eq;
+  int fd;
 
   while(peek(ps, es, "<>")){
-    tok = gettoken(ps, es, 0, 0);
-    if(gettoken(ps, es, &q, &eq) != 'a')
+    tok = gettoken(ps, es, 0, 0);         // Determine the specific type of redirect.
+    if(gettoken(ps, es, &q, &eq) != 'a')  // Get the file argument.
       panic("missing file for redirection");
     switch(tok){
-    case '<':
-      cmd = redircmd(cmd, q, eq, O_RDONLY, 0);
-      break;
-    case '>':
-      cmd = redircmd(cmd, q, eq, O_WRONLY|O_CREATE, 1);
-      break;
-    case '+':  // >>
-      cmd = redircmd(cmd, q, eq, O_WRONLY|O_CREATE, 1);
-      break;
+      case '<':
+        cmd = redircmd(cmd, q, eq, O_RDONLY, 0);
+        break;
+      case '>':
+        cmd = redircmd(cmd, q, eq, O_WRONLY|O_CREATE, 1);
+        break;
+      case '+':  // >>
+        cmd = redircmd(cmd, q, eq, O_WRONLY|O_CREATE, 1);
+        break;
+      case '*':  // >&  -- fd redirect
+        fd = atoi(q);
+        if (fd < 0 || fd >= 10)  // only support fds in [0, 9]
+          panic("invalid redir fd");
+        cmd = redirfdcmd(cmd, fd, 1);  // only redirects &1
+        break;
+      case 'c':  // >c  -- console redirect, which is an fd redirect with nicer numbers
+        fd = atoi(q);
+        if (fd < 0 || fd >= NCONS)  // only support fds for consoles
+          panic("invalid console");
+        fd += (NCONS - 1);  // init should have opened the appropriate fds for us
+        cmd = redirfdcmd(cmd, fd, 1);  // only redirects &1
+        break;
     }
   }
   return cmd;
@@ -455,39 +533,45 @@ nulterminate(struct cmd *cmd)
   struct listcmd *lcmd;
   struct pipecmd *pcmd;
   struct redircmd *rcmd;
+  struct redirfdcmd *fcmd;
 
   if(cmd == 0)
     return 0;
 
   switch(cmd->type){
-  case EXEC:
-    ecmd = (struct execcmd*)cmd;
-    for(i=0; ecmd->argv[i]; i++)
-      *ecmd->eargv[i] = 0;
-    break;
+    case EXEC:
+      ecmd = (struct execcmd*)cmd;
+      for(i=0; ecmd->argv[i]; i++)
+        *ecmd->eargv[i] = 0;
+      break;
 
-  case REDIR:
-    rcmd = (struct redircmd*)cmd;
-    nulterminate(rcmd->cmd);
-    *rcmd->efile = 0;
-    break;
+    case REDIR:
+      rcmd = (struct redircmd*)cmd;
+      nulterminate(rcmd->cmd);
+      *rcmd->efile = 0;
+      break;
 
-  case PIPE:
-    pcmd = (struct pipecmd*)cmd;
-    nulterminate(pcmd->left);
-    nulterminate(pcmd->right);
-    break;
+    case REDIRFD:
+      fcmd = (struct redirfdcmd*)cmd;
+      nulterminate(fcmd->cmd);
+      break;
 
-  case LIST:
-    lcmd = (struct listcmd*)cmd;
-    nulterminate(lcmd->left);
-    nulterminate(lcmd->right);
-    break;
+    case PIPE:
+      pcmd = (struct pipecmd*)cmd;
+      nulterminate(pcmd->left);
+      nulterminate(pcmd->right);
+      break;
 
-  case BACK:
-    bcmd = (struct backcmd*)cmd;
-    nulterminate(bcmd->cmd);
-    break;
+    case LIST:
+      lcmd = (struct listcmd*)cmd;
+      nulterminate(lcmd->left);
+      nulterminate(lcmd->right);
+      break;
+
+    case BACK:
+      bcmd = (struct backcmd*)cmd;
+      nulterminate(bcmd->cmd);
+      break;
   }
   return cmd;
 }
